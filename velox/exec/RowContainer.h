@@ -408,6 +408,25 @@ class RowContainer {
     return *stringAllocator_;
   }
 
+  /// Enables content-based deduplication of non-inline varchar/varbinary
+  /// grouping-key payloads. Once on, storing a non-inline StringView value
+  /// looks up its content in an internal set; if a canonical copy already
+  /// exists the row's key StringView is aliased to it and copyMultipart is
+  /// skipped. The set holds StringViews backed by stringAllocator_ so its
+  /// lifetime is bound to this container; clear() drops the set.
+  ///
+  /// Must be called before any rows are inserted. Only meaningful for a
+  /// partial-aggregation RowContainer whose key list contains at least one
+  /// VARCHAR/VARBINARY column.
+  void enableStringKeyDedup() {
+    VELOX_CHECK_EQ(numRows_, 0);
+    stringKeyDedupEnabled_ = true;
+  }
+
+  bool stringKeyDedupEnabled() const {
+    return stringKeyDedupEnabled_;
+  }
+
   /// Returns the number of used rows in 'this'. This is the number of rows a
   /// RowContainerIterator would access.
   int64_t numRows() const {
@@ -766,6 +785,15 @@ class RowContainer {
     normalizedKeySize_ = 0;
   }
 
+  /// Returns whether this container reserved the 8-byte slot below each
+  /// row for a normalized key or a cached hash. False when the owning
+  /// HashTable was constructed in kHash mode from the start (e.g. any
+  /// key type does not support valueIds), in which case no slot exists
+  /// and RowContainer::normalizedKey(row) would read out of bounds.
+  bool hasNormalizedKeys() const {
+    return hasNormalizedKeys_;
+  }
+
   RowColumn columnAt(int32_t index) const {
     return rowColumns_[index];
   }
@@ -1117,9 +1145,16 @@ class RowContainer {
       return;
     }
     if constexpr (std::is_same_v<T, StringView>) {
+      const auto value = decoded.valueAt<T>(rowIndex);
+      if (isKey && stringKeyDedupEnabled_ &&
+          storeDedupStringKey(value, row, offset)) {
+        return;
+      }
       RowSizeTracker tracker(row[rowSizeOffset_], *stringAllocator_);
-      stringAllocator_->copyMultipart(
-          decoded.valueAt<T>(rowIndex), row, offset);
+      stringAllocator_->copyMultipart(value, row, offset);
+      if (isKey && stringKeyDedupEnabled_) {
+        recordDedupStringKey(row, offset);
+      }
     } else {
       *reinterpret_cast<T*>(row + offset) = decoded.valueAt<T>(rowIndex);
     }
@@ -1134,12 +1169,60 @@ class RowContainer {
       int32_t offset) {
     using T = typename TypeTraits<Kind>::NativeType;
     if constexpr (std::is_same_v<T, StringView>) {
+      const auto value = decoded.valueAt<T>(rowIndex);
+      if (isKey && stringKeyDedupEnabled_ &&
+          storeDedupStringKey(value, row, offset)) {
+        return;
+      }
       RowSizeTracker tracker(row[rowSizeOffset_], *stringAllocator_);
-      stringAllocator_->copyMultipart(
-          decoded.valueAt<T>(rowIndex), row, offset);
+      stringAllocator_->copyMultipart(value, row, offset);
+      if (isKey && stringKeyDedupEnabled_) {
+        recordDedupStringKey(row, offset);
+      }
     } else {
       *reinterpret_cast<T*>(row + offset) = decoded.valueAt<T>(rowIndex);
     }
+  }
+
+  // Deduplicated store path for a varchar/varbinary key column. Inline
+  // StringViews (<=12 bytes) are stored directly since they carry no
+  // allocator payload. Non-inline values are looked up in
+  // 'stringKeyDedup_' using the caller-supplied contiguous 'value' as the
+  // probe key. On hit, the row's StringView is aliased to the canonical
+  // copy and true is returned; on miss, false is returned so the caller
+  // performs the normal copy and calls 'recordDedupStringKey' afterwards.
+  bool storeDedupStringKey(StringView value, char* row, int32_t offset) {
+    if (value.isInline()) {
+      valueAt<StringView>(row, offset) = value;
+      return true;
+    }
+    auto it = stringKeyDedup_.find(value);
+    if (it != stringKeyDedup_.end()) {
+      valueAt<StringView>(row, offset) = *it;
+      return true;
+    }
+    return false;
+  }
+
+  // Registers the just-stored StringView at 'offset' in 'row' as the
+  // canonical copy for its content. Only single-piece allocator payloads
+  // are inserted: multipart payloads would hash unsafely via std::hash
+  // (which reads size() bytes starting at data(), overshooting a
+  // fragmented block). In practice grouping-key strings are small enough
+  // (<= kMaxAlloc, roughly 3KB) that HashStringAllocator returns a single
+  // piece, so the multipart skip covers only pathological cases.
+  void recordDedupStringKey(char* row, int32_t offset) {
+    const auto stored = valueAt<StringView>(row, offset);
+    if (stored.isInline()) {
+      return;
+    }
+    const auto& header =
+        reinterpret_cast<const HashStringAllocator::Header*>(
+            stored.data())[-1];
+    if (static_cast<uint32_t>(header.size()) < stored.size()) {
+      return;
+    }
+    stringKeyDedup_.insert(stored);
   }
 
   template <TypeKind Kind>
@@ -1566,6 +1649,15 @@ class RowContainer {
   int32_t& countRef(char* row) const {
     return *reinterpret_cast<int32_t*>(row + countOffset_);
   }
+
+  // Content-addressed set of canonical non-inline StringView payloads used
+  // when 'stringKeyDedupEnabled_' is true. Every StringView here points into
+  // memory owned by 'stringAllocator_', so the set must be cleared whenever
+  // that allocator is cleared. Shared across all varchar/varbinary key
+  // columns since content-equal payloads can be aliased regardless of the
+  // column they came from.
+  folly::F14FastSet<StringView> stringKeyDedup_;
+  bool stringKeyDedupEnabled_{false};
 
   const std::vector<TypePtr> keyTypes_;
   const bool nullableKeys_;

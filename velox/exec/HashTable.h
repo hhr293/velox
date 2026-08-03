@@ -418,6 +418,14 @@ class BaseHashTable {
   /// VectorHashers of 'this'.
   virtual HashMode hashMode() const = 0;
 
+  /// Enables caching computed hash values in the 8-byte normalized-key
+  /// slot below each row (row[-1]) even after transitioning to kHash
+  /// mode. See HashTable::enableHashCacheInSlot() for the full
+  /// contract. Called by GroupingSet during setup, before any rows are
+  /// inserted. No-op if the RowContainer never reserved the slot
+  /// (e.g. the table was constructed directly in kHash mode).
+  virtual void enableHashCacheInSlot() = 0;
+
   /// Disables use of array or normalized key hash modes.
   void forceGenericHashMode(int8_t spillInputStartPartitionBit) {
     setHashMode(HashMode::kHash, 0, spillInputStartPartitionBit);
@@ -699,6 +707,16 @@ class HashTable : public BaseHashTable {
 
   HashMode hashMode() const override {
     return hashMode_;
+  }
+
+  void enableHashCacheInSlot() override {
+    if (rows_ && rows_->hasNormalizedKeys()) {
+      hashCacheInSlot_ = true;
+    }
+  }
+
+  bool hashCacheInSlotEnabled() const {
+    return hashCacheInSlot_;
   }
 
   void addRuntimeStats(
@@ -1254,6 +1272,12 @@ class HashTable : public BaseHashTable {
   // Counts the number of rehash() calls.
   int64_t numRehashes_{0};
   HashMode hashMode_ = HashMode::kArray;
+
+  // When true, the RowContainer keeps the 8-byte slot below each row
+  // allocated even after transitioning to kHash mode, and the table
+  // caches computed hashes into that slot for reuse on subsequent
+  // rehashes. See enableHashCacheInSlot() for the full contract.
+  bool hashCacheInSlot_{false};
   // Owns the memory of multiple build side hash join tables that are
   // combined into a single probe hash table.
   std::vector<std::unique_ptr<HashTable<ignoreNullKeys>>> otherTables_;

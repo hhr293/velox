@@ -372,6 +372,32 @@ class QueryConfig {
       80,
       "Abandon partial aggregation if reduction percentage exceeds this.")
 
+  /// When true, HashAggregate deduplicates non-inline varchar/varbinary
+  /// grouping-key payloads across rows via a per-key content-addressed lookup
+  /// so duplicate key values share a single HashStringAllocator copy. Inline
+  /// StringViews (<=12 bytes) are skipped since no copy happens for those.
+  VELOX_QUERY_CONFIG(
+      kStringKeyDedupEnabled,
+      stringKeyDedupEnabled,
+      "string_key_dedup_enabled",
+      bool,
+      false,
+      "Deduplicate non-inline varchar/varbinary aggregation key payloads.")
+
+  /// Keeps the 8-byte normalized-key slot allocated below each row in
+  /// RowContainer even after HashTable transitions to kHash mode, and caches
+  /// the just-computed hash into that slot. Subsequent rehashes read the
+  /// cached hash from the slot instead of recomputing via RowContainer::hash.
+  /// Worth enabling for partial HashAgg with large distinct-count string keys
+  /// (which trigger kHash mode); adds 8 bytes per row to container footprint.
+  VELOX_QUERY_CONFIG(
+      kHashCacheInSlotEnabled,
+      hashCacheInSlotEnabled,
+      "hash_cache_in_slot_enabled",
+      bool,
+      false,
+      "Cache hash values in the row's normalized-key slot in kHash mode.")
+
   /// Memory threshold in bytes for triggering string compaction during
   /// global aggregation. Disabled by default (0).
   VELOX_QUERY_CONFIG(

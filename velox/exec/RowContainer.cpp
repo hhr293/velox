@@ -406,10 +406,18 @@ int32_t RowContainer::findRows(folly::Range<char**> rows, char** result) const {
 }
 
 void RowContainer::freeVariableWidthFields(folly::Range<char**> rows) {
+  const auto numKeys = keyTypes_.size();
   for (auto i = 0; i < types_.size(); ++i) {
     switch (typeKinds_[i]) {
       case TypeKind::VARCHAR:
       case TypeKind::VARBINARY: {
+        // Non-inline key payloads are owned by 'stringKeyDedup_' when dedup is
+        // enabled and are freed with the whole allocator at clear() time. Do
+        // not free them per-row here: multiple rows may alias the same payload,
+        // and freeing one would corrupt the others.
+        if (stringKeyDedupEnabled_ && i < numKeys) {
+          break;
+        }
         freeVariableWidthFieldsAtColumn<StringView>(i, rows);
         break;
       }
@@ -993,6 +1001,7 @@ void RowContainer::clear() {
   rowPointers_.clear();
   rowPointers_.shrink_to_fit();
   stringAllocator_->clear();
+  stringKeyDedup_.clear();
   numRows_ = 0;
   numRowsWithNormalizedKey_ = 0;
   normalizedKeySize_ = originalNormalizedKeySize_;

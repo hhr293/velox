@@ -455,6 +455,28 @@ void GroupingSet::createHashTable() {
   }
 
   RowContainer& rows = *table_->rows();
+  // On a partial aggregation with any varchar/varbinary grouping key, enable
+  // content-based dedup of non-inline key payloads. Only worthwhile pre-shuffle
+  // (isPartial_) where high duplication is the norm; final aggregations after
+  // shuffle already see one row per group.
+  if (isPartial_ && queryConfig_->stringKeyDedupEnabled()) {
+    for (const auto& type : rows.keyTypes()) {
+      const auto kind = type->kind();
+      if (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
+        rows.enableStringKeyDedup();
+        break;
+      }
+    }
+  }
+  // Cache computed hashes in row[-1] so rehashes after transitioning to
+  // kHash mode can read the hash back instead of recomputing it. Only
+  // enable on partial aggregation where the RowContainer holds mostly
+  // distinct groups (agg has collapsed duplicates), so the +8B/row cost
+  // is amortized. For join builds the row count equals the whole build
+  // side, and the extra footprint often hurts probe-side cache locality.
+  if (isPartial_ && queryConfig_->hashCacheInSlotEnabled()) {
+    table_->enableHashCacheInSlot();
+  }
   initializeAggregates(aggregates_, rows, false);
 
   auto numColumns = rows.keyTypes().size() + aggregates_.size();

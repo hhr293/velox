@@ -354,6 +354,12 @@ char* HashTable<ignoreNullKeys>::insertEntry(
     // the word below the row. Space was reserved in the allocation
     // unless we have given up on normalized keys.
     RowContainer::normalizedKey(group) = lookup.normalizedKeys[row]; // NOLINT
+  } else if (hashMode_ == HashMode::kHash && hashCacheInSlot_) {
+    // Cache the just-computed hash so rehashes can skip
+    // RowContainer::hash. Same slot as kNormalizedKey uses; the slot
+    // remained allocated because setHashMode(kHash) skipped
+    // disableNormalizedKeys() when the cache is on.
+    RowContainer::normalizedKey(group) = lookup.hashes[row]; // NOLINT
   }
   ++numDistinct_;
   lookup.newGroups.push_back(row);
@@ -818,17 +824,24 @@ bool HashTable<ignoreNullKeys>::hashRows(
   if (rows.empty()) {
     return true;
   }
-  if (!initNormalizedKeys && hashMode_ == HashMode::kNormalizedKey) {
+  if (!initNormalizedKeys &&
+      (hashMode_ == HashMode::kNormalizedKey ||
+       (hashMode_ == HashMode::kHash && hashCacheInSlot_))) {
     // Prefetch row pointers ahead to hide DRAM latency when reading
     // normalizedKey from random RowContainer arena addresses.
     const auto numRows = static_cast<int32_t>(rows.size());
     AdaptivePrefetch prefetch(numRows);
+    const bool mixHash = hashMode_ == HashMode::kNormalizedKey;
     for (int32_t i = 0; i < numRows; ++i) {
       if (auto ahead = prefetch.lookAhead()) {
         __builtin_prefetch(rows[i + ahead] - sizeof(normalized_key_t));
       }
-      hashes[i] =
-          mixNormalizedKey(RowContainer::normalizedKey(rows[i]), sizeBits_);
+      const auto slot = RowContainer::normalizedKey(rows[i]);
+      // kNormalizedKey stores the raw normalized key and needs the mix
+      // step to spread bits across the table. kHash-cache-in-slot
+      // stores the already-mixed hash produced by RowContainer::hash,
+      // so it is returned as-is.
+      hashes[i] = mixHash ? mixNormalizedKey(slot, sizeBits_) : slot;
     }
     return true;
   }
@@ -856,6 +869,14 @@ bool HashTable<ignoreNullKeys>::hashRows(
     for (auto i = 0; i < rows.size(); ++i) {
       RowContainer::normalizedKey(rows[i]) = hashes[i];
       hashes[i] = mixNormalizedKey(hashes[i], sizeBits_);
+    }
+  } else if (hashMode_ == HashMode::kHash && hashCacheInSlot_) {
+    // Cache the just-computed hash in row[-1] so future rehashes can
+    // read it back instead of recomputing via RowContainer::hash.
+    // rows_->hash outputs the already-mixed hash; the slot stores it
+    // as-is and the fast-path returns it without additional mixing.
+    for (auto i = 0; i < rows.size(); ++i) {
+      RowContainer::normalizedKey(rows[i]) = hashes[i];
     }
   }
   return true;
@@ -1620,7 +1641,13 @@ void HashTable<ignoreNullKeys>::setHashMode(
     for (auto& hasher : hashers_) {
       hasher->resetStats();
     }
-    rows_->disableNormalizedKeys();
+    // Preserve the 8-byte normalized-key slot in kHash mode when hash
+    // caching is enabled, so subsequent rehashes can read the cached
+    // hash directly from row[-1] rather than recomputing via
+    // RowContainer::hash.
+    if (!hashCacheInSlot_) {
+      rows_->disableNormalizedKeys();
+    }
     capacity_ = 0;
     // Makes tables of the right size and rehashes.
     checkSize(numNew, true, spillInputStartPartitionBit);
