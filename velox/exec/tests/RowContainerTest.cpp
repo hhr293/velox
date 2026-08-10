@@ -2794,6 +2794,96 @@ TEST_F(RowContainerTest, setAllNull) {
       (row[accColumn.initializedByte()] & accColumn.initializedMask()), 0);
 }
 
+TEST_F(RowContainerTest, allocateRowsBatch) {
+  // Fast path: allocates numRows contiguous rows in a single bump + single
+  // memset. Verifies row count, that returned pointers are contiguous with
+  // fixed stride, and that per-row header state (free flag, null bits) matches
+  // what newRow()/initializeRow() would produce.
+  constexpr int32_t kNumRows = 200;
+  auto data = makeRowContainer({BIGINT()}, {BIGINT(), INTEGER()});
+
+  std::vector<char*> rows(kNumRows);
+  ASSERT_TRUE(data->allocateRowsBatch(kNumRows, rows.data()));
+  EXPECT_EQ(kNumRows, data->numRows());
+  RowContainerTestHelper(data.get()).checkConsistency();
+
+  const auto strideBytes = data->fixedRowSize();
+  for (int32_t i = 1; i < kNumRows; ++i) {
+    EXPECT_EQ(rows[i], rows[i - 1] + strideBytes) << "row " << i;
+  }
+
+  // The free flag must be cleared (this row is in use).
+  const auto freeFlagOffset = data->probedFlagOffset() + 1;
+  for (int32_t i = 0; i < kNumRows; ++i) {
+    EXPECT_FALSE(bits::isBitSet(rows[i], freeFlagOffset)) << "row " << i;
+  }
+
+  // Null bits must be zero. All key columns are non-null on entry.
+  auto keyCol = data->columnAt(0);
+  for (int32_t i = 0; i < kNumRows; ++i) {
+    EXPECT_FALSE(RowContainer::isNullAt(
+        rows[i], keyCol.nullByte(), keyCol.nullMask()))
+        << "row " << i;
+  }
+}
+
+TEST_F(RowContainerTest, allocateRowsBatchZero) {
+  auto data = makeRowContainer({BIGINT()}, {BIGINT()});
+  // numRows == 0 must be a no-op returning true.
+  ASSERT_TRUE(data->allocateRowsBatch(0, nullptr));
+  EXPECT_EQ(0, data->numRows());
+}
+
+TEST_F(RowContainerTest, allocateRowsBatchFreeListFallback) {
+  // When the free list is non-empty (rows previously erased and pending
+  // reuse), the fast path must decline and let the caller fall back to
+  // per-row newRow().
+  constexpr int32_t kNumRows = 32;
+  auto data = makeRowContainer({BIGINT()}, {BIGINT()});
+
+  std::vector<char*> rows;
+  rows.reserve(kNumRows);
+  for (int32_t i = 0; i < kNumRows; ++i) {
+    rows.push_back(data->newRow());
+  }
+  // Erase a subset: those rows now sit on the free list.
+  std::vector<char*> erased;
+  for (int32_t i = 0; i < kNumRows; i += 2) {
+    erased.push_back(rows[i]);
+  }
+  data->eraseRows(folly::Range<char**>(erased.data(), erased.size()));
+
+  std::vector<char*> out(10);
+  EXPECT_FALSE(data->allocateRowsBatch(10, out.data()));
+}
+
+TEST_F(RowContainerTest, allocateRowsBatchEquivalentToNewRow) {
+  // Compare batch alloc against N per-row newRow() invocations. Row header
+  // bytes (excluding the caller-writable payload area) must match.
+  constexpr int32_t kNumRows = 50;
+
+  auto viaNewRow = makeRowContainer({BIGINT()}, {BIGINT()});
+  std::vector<char*> refRows(kNumRows);
+  for (int32_t i = 0; i < kNumRows; ++i) {
+    refRows[i] = viaNewRow->newRow();
+  }
+
+  auto viaBatch = makeRowContainer({BIGINT()}, {BIGINT()});
+  std::vector<char*> batchRows(kNumRows);
+  ASSERT_TRUE(viaBatch->allocateRowsBatch(kNumRows, batchRows.data()));
+
+  EXPECT_EQ(viaNewRow->numRows(), viaBatch->numRows());
+  EXPECT_EQ(viaNewRow->fixedRowSize(), viaBatch->fixedRowSize());
+
+  // Byte-for-byte compare of every row's fixed payload region. Both paths
+  // memset the row to zero, so all bytes must match.
+  const auto rowBytes = viaNewRow->fixedRowSize();
+  for (int32_t i = 0; i < kNumRows; ++i) {
+    EXPECT_EQ(0, std::memcmp(refRows[i], batchRows[i], rowBytes))
+        << "row " << i << " mismatches";
+  }
+}
+
 VELOX_INSTANTIATE_TEST_SUITE_P(
     RowContainerTest,
     RowContainerTest,
