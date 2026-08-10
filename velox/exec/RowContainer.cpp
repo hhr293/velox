@@ -295,6 +295,46 @@ char* RowContainer::newRow() {
   return initializeRow(row, false /* reuse */);
 }
 
+bool RowContainer::allocateRowsBatch(int32_t numRows, char** out) {
+  VELOX_DCHECK(mutable_, "Can't add row into an immutable row container");
+  if (numRows <= 0) {
+    return true;
+  }
+  // Fast path requires no free rows to recycle.
+  if (firstFreeRow_ != nullptr) {
+    return false;
+  }
+  const int32_t strideBytes = fixedRowSize_ + normalizedKeySize_;
+  const int64_t totalBytes = static_cast<int64_t>(strideBytes) * numRows;
+  // Bail if the current arena run cannot fit all rows contiguously.
+  if (rows_.freeBytes() < totalBytes) {
+    return false;
+  }
+  char* base = rows_.allocateFixed(totalBytes, alignment_);
+  // A single large memset covers all rows at once, amortizing memset
+  // dispatch cost and giving the hardware a straight sequential-write
+  // pattern that the prefetcher and store combining path handle well.
+  ::memset(base, 0, totalBytes);
+  numRows_ += numRows;
+  if (normalizedKeySize_) {
+    numRowsWithNormalizedKey_ += numRows;
+  }
+  for (int32_t i = 0; i < numRows; ++i) {
+    char* row = base + normalizedKeySize_ + i * strideBytes;
+    // The memset above cleared the free flag, null bits and variable row
+    // size. countRef defaults to 1 (matching initializeRow), so restore it
+    // when the row container tracks reference counts.
+    if (countOffset_) {
+      countRef(row) = 1;
+    }
+    if (useListRowIndex_) {
+      rowPointers_.push_back(row);
+    }
+    out[i] = row;
+  }
+  return true;
+}
+
 void RowContainer::setAllNull(char* row) {
   VELOX_CHECK(!bits::isBitSet(row, freeFlagOffset_));
   removeOrUpdateRowColumnStats(row, /*setToNull=*/true);

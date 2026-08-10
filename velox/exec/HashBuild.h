@@ -365,6 +365,11 @@ class HashBuild final : public Operator {
   // Set of active rows during addInput().
   SelectivityVector activeRows_;
 
+  // Row pointers for the current input batch. Populated by
+  // RowContainer::allocateRowsBatch on the fast path so we can iterate the
+  // rows in-place. Reused across batches to avoid per-batch allocation.
+  raw_vector<char*> newRows_;
+
   // True if this is a build side of an anti or left semi project join and has
   // at least one entry with null join keys.
   bool joinHasNullKeys_{false};

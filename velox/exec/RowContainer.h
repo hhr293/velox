@@ -345,6 +345,23 @@ class RowContainer {
   /// Allocates a new row and initializes possible aggregates to null.
   char* newRow();
 
+  /// Allocates 'numRows' contiguous rows in a single bump allocation and
+  /// clears them with one large memset. Fills 'out' with pointers to each
+  /// row. Returns true when the fast path succeeded; returns false when it
+  /// is not applicable, in which case the caller must fall back to
+  /// per-row newRow().
+  ///
+  /// Requires an append-only workload: no rows on the free list to recycle
+  /// and enough contiguous space in the current arena run. HashBuild
+  /// satisfies this; HashAggregation after spill does not.
+  ///
+  /// Consolidating the per-row memsets into one large memset amortizes the
+  /// memset dispatch/setup cost, which dominates for the small 40-80 byte
+  /// per-row zeroing done by initializeRow(). The single sequential memset
+  /// also gives the hardware prefetcher and store combining a clean
+  /// pattern to work with.
+  bool allocateRowsBatch(int32_t numRows, char** out);
+
   uint32_t rowSize(const char* row) const {
     return fixedRowSize_ +
         (rowSizeOffset_

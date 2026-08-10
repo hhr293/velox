@@ -598,8 +598,29 @@ void HashBuild::addInput(RowVectorPtr input) {
         input->childAt(spillProbedFlagChannel_)->asFlatVector<bool>();
   }
 
+  // Try to allocate all rows for this batch in a single bump plus a single
+  // large memset. This replaces N per-row newRow() calls and amortizes the
+  // memset dispatch/setup cost that dominates the small per-row memsets.
+  // The single sequential memset is also friendlier to the hardware
+  // prefetcher and store-combining path than the interleaved
+  // alloc/memset/column-store pattern in the per-row loop. Falls back to
+  // per-row newRow() when the arena run cannot fit a contiguous span or
+  // when the free list has rows to reuse.
+  const auto numActive = activeRows_.countSelected();
+  newRows_.resize(numActive);
+  const bool batchAllocated =
+      rows->allocateRowsBatch(numActive, newRows_.data());
+
+  int32_t slot = 0;
   activeRows_.applyToSelected([&](auto rowIndex) {
-    char* newRow = rows->newRow();
+    char* newRow;
+    if (batchAllocated) {
+      newRow = newRows_[slot];
+    } else {
+      newRow = rows->newRow();
+      newRows_[slot] = newRow;
+    }
+    ++slot;
     if (nextOffset) {
       *reinterpret_cast<char**>(newRow + nextOffset) = nullptr;
     }
