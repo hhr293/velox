@@ -19,6 +19,7 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <vector>
 
 #include <velox/type/DecimalUtil.h>
 #include "velox/common/base/tests/GTestUtils.h"
@@ -76,6 +77,106 @@ TEST(FilterTest, isNotNull) {
   EXPECT_TRUE(notNull.testInt128Range(0, 0, true));
 
   EXPECT_FALSE(notNull.testNull());
+}
+
+TEST(FilterTest, isNotNullTestValues) {
+  IsNotNull notNull;
+  // Call through the base class too so that the virtual dispatch is covered.
+  const Filter* filter = &notNull;
+
+  // The result must not depend on the lane values.
+  const std::vector<int64_t> int64Values = {
+      0,
+      -1,
+      std::numeric_limits<int64_t>::min(),
+      std::numeric_limits<int64_t>::max(),
+      123456789,
+      -987654321,
+      1,
+      42};
+  for (auto offset = 0; offset + xsimd::batch<int64_t>::size <=
+       int64Values.size();
+       ++offset) {
+    auto v = xsimd::load_unaligned(int64Values.data() + offset);
+    EXPECT_EQ(
+        simd::allSetBitMask<int64_t>(), simd::toBitMask(notNull.testValues(v)));
+    EXPECT_EQ(
+        simd::allSetBitMask<int64_t>(), simd::toBitMask(filter->testValues(v)));
+  }
+
+  std::vector<int32_t> int32Values(64);
+  std::iota(int32Values.begin(), int32Values.end(), -32);
+  int32Values[0] = std::numeric_limits<int32_t>::min();
+  int32Values[1] = std::numeric_limits<int32_t>::max();
+  for (auto offset = 0; offset + xsimd::batch<int32_t>::size <=
+       int32Values.size();
+       offset += 3) {
+    auto v = xsimd::load_unaligned(int32Values.data() + offset);
+    EXPECT_EQ(
+        simd::allSetBitMask<int32_t>(), simd::toBitMask(notNull.testValues(v)));
+    EXPECT_EQ(
+        simd::allSetBitMask<int32_t>(), simd::toBitMask(filter->testValues(v)));
+  }
+
+  std::vector<int16_t> int16Values(128);
+  std::iota(int16Values.begin(), int16Values.end(), -64);
+  int16Values[0] = std::numeric_limits<int16_t>::min();
+  int16Values[1] = std::numeric_limits<int16_t>::max();
+  for (auto offset = 0; offset + xsimd::batch<int16_t>::size <=
+       int16Values.size();
+       offset += 5) {
+    auto v = xsimd::load_unaligned(int16Values.data() + offset);
+    EXPECT_EQ(
+        simd::allSetBitMask<int16_t>(), simd::toBitMask(notNull.testValues(v)));
+    EXPECT_EQ(
+        simd::allSetBitMask<int16_t>(), simd::toBitMask(filter->testValues(v)));
+  }
+
+  const std::vector<double> doubleValues = {
+      0.0,
+      -0.0,
+      std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::infinity(),
+      -std::numeric_limits<double>::infinity(),
+      1.5,
+      -2.5,
+      std::numeric_limits<double>::max()};
+  for (auto offset = 0;
+       offset + xsimd::batch<double>::size <= doubleValues.size();
+       ++offset) {
+    auto v = xsimd::load_unaligned(doubleValues.data() + offset);
+    EXPECT_EQ(
+        simd::allSetBitMask<double>(), simd::toBitMask(notNull.testValues(v)));
+    EXPECT_EQ(
+        simd::allSetBitMask<double>(), simd::toBitMask(filter->testValues(v)));
+  }
+
+  const std::vector<float> floatValues = {
+      0.0f,
+      -0.0f,
+      std::numeric_limits<float>::quiet_NaN(),
+      std::numeric_limits<float>::infinity(),
+      -std::numeric_limits<float>::infinity(),
+      1.5f,
+      -2.5f,
+      std::numeric_limits<float>::max(),
+      3.0f,
+      4.0f,
+      5.0f,
+      6.0f,
+      7.0f,
+      8.0f,
+      9.0f,
+      10.0f};
+  for (auto offset = 0;
+       offset + xsimd::batch<float>::size <= floatValues.size();
+       ++offset) {
+    auto v = xsimd::load_unaligned(floatValues.data() + offset);
+    EXPECT_EQ(
+        simd::allSetBitMask<float>(), simd::toBitMask(notNull.testValues(v)));
+    EXPECT_EQ(
+        simd::allSetBitMask<float>(), simd::toBitMask(filter->testValues(v)));
+  }
 }
 
 TEST(FilterTest, isNull) {
