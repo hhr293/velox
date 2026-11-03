@@ -102,6 +102,7 @@ set(
   WindowFunctionRegistryTest.cpp
   StreamingEnforceDistinctTest.cpp
   HashBitRangeTest.cpp
+  RollupPartialAggTest.cpp
   # group4 (~575s): HashJoinTest ~575 + 9 lightweight
   HashJoinTest.cpp
   SpillTest.cpp

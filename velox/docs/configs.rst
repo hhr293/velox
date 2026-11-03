@@ -606,6 +606,15 @@ Aggregation
      - integer
      - 80
      - Abandons partial aggregation if number of groups equals or exceeds this percentage of the number of input rows.
+   * - rollup_partial_aggregation_enabled
+     - bool
+     - false
+     - Fuses an Expand node that produces a complete prefix ROLLUP with the partial aggregation above it. The grouping
+       levels are kept in a prefix tree, each input row is added once instead of once per level, and every node is
+       merged into its parent when the tree is output. Supports sum, min, max, avg and count over integer or decimal
+       inputs. Flushes when the tree reaches max_partial_aggregation_memory and, like the partial aggregation it
+       replaces, gives up aggregating if a flush shows that the groups are more than 40% of the rows the unfused plan
+       would aggregate.
    * - aggregation_compaction_bytes_threshold
      - integer
      - 0

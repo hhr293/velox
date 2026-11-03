@@ -373,6 +373,14 @@ class QueryConfig {
       "Maximum memory for extended partial aggregation.")
 
   VELOX_QUERY_CONFIG(
+      kRollupPartialAggregationEnabled,
+      rollupPartialAggregationEnabled,
+      "rollup_partial_aggregation_enabled",
+      bool,
+      false,
+      "Fuses an Expand node that produces a prefix ROLLUP with the partial aggregation above it. The grouping levels are kept in a prefix tree and every input row is added once, instead of once per level. Like the partial aggregation it replaces, it gives up aggregating when that does not reduce the data.")
+
+  VELOX_QUERY_CONFIG(
       kAbandonPartialAggregationMinRows,
       abandonPartialAggregationMinRows,
       "abandon_partial_aggregation_min_rows",

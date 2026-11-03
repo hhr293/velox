@@ -45,6 +45,7 @@
 #include "velox/exec/OrderBy.h"
 #include "velox/exec/ParallelProject.h"
 #include "velox/exec/PartitionedOutput.h"
+#include "velox/exec/RollupAggregation.h"
 #include "velox/exec/RoundRobinPartitionFunction.h"
 #include "velox/exec/RowNumber.h"
 #include "velox/exec/ScaleWriterLocalPartition.h"
@@ -662,6 +663,26 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
     } else if (
         auto expandNode =
             std::dynamic_pointer_cast<const core::ExpandNode>(planNode)) {
+      if (i < planNodes.size() - 1 &&
+          ctx->queryConfig().rollupPartialAggregationEnabled()) {
+        // Expand, then an optional projection, then the partial aggregation.
+        std::shared_ptr<const core::ProjectNode> projectNode =
+            std::dynamic_pointer_cast<const core::ProjectNode>(
+                planNodes[i + 1]);
+        const auto aggregationIndex = projectNode ? i + 2 : i + 1;
+        if (aggregationIndex < planNodes.size()) {
+          if (auto aggregationNode =
+                  std::dynamic_pointer_cast<const core::AggregationNode>(
+                      planNodes[aggregationIndex])) {
+            if (auto rollup = RollupAggregation::tryCreate(
+                    id, ctx.get(), expandNode, projectNode, aggregationNode)) {
+              operators.push_back(std::move(rollup));
+              i = aggregationIndex;
+              continue;
+            }
+          }
+        }
+      }
       operators.push_back(std::make_unique<Expand>(id, ctx.get(), expandNode));
     } else if (
         auto groupIdNode =
