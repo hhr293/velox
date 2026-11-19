@@ -446,6 +446,22 @@ void VectorHasher::lookupValueIdsTyped(
       rows.updateBounds();
       return;
     }
+    // Booleans are bit-packed, so their values cannot be read as an array.
+    if constexpr (Kind != TypeKind::BOOLEAN) {
+      // Identity-mapped input without nulls: read the values directly instead
+      // of checking for a null and decoding the index on every row.
+      const T* values = decoded.data<T>();
+      rows.applyToSelected([&](vector_size_t row) INLINE_LAMBDA {
+        const uint64_t id = lookupValueId(values[row]);
+        if (id == kUnmappable) {
+          rows.setValid(row, false);
+          return;
+        }
+        result[row] = multiplier_ == 1 ? id : result[row] + multiplier_ * id;
+      });
+      rows.updateBounds();
+      return;
+    }
   }
 
   if (decoded.isIdentityMapping() ||

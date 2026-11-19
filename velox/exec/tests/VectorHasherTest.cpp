@@ -169,6 +169,55 @@ class VectorHasherTest : public testing::Test,
           << expected->toString(i);
     }
   }
+
+  // Looks up 'probe' in a hasher built on 'keys', with all rows and with every
+  // third row removed from the selection, for one and for several key columns.
+  // 'expectedKeyIndex' is the position in 'keys' of each probe key, or -1 for a
+  // key that was not built. Rows that are removed or have no id keep their
+  // result.
+  void testLookupValueIds(
+      const VectorPtr& keys,
+      const VectorPtr& probe,
+      const std::vector<int32_t>& expectedKeyIndex,
+      bool byRange = false) {
+    constexpr uint64_t kInitial = 7;
+    const auto size = probe->size();
+    for (uint64_t multiplier : {1, 100}) {
+      auto hasher = exec::VectorHasher::create(keys->type(), 0);
+      SelectivityVector keyRows(keys->size());
+      raw_vector<uint64_t> keyIds(keys->size());
+      hasher->decode(*keys, keyRows);
+      hasher->computeValueIds(keyRows, keyIds);
+      byRange ? hasher->enableValueRange(multiplier, 0)
+              : hasher->enableValueIds(multiplier, 0);
+
+      for (bool removeEveryThird : {false, true}) {
+        SelectivityVector rows(size);
+        for (auto row = 0; removeEveryThird && row < size; row += 3) {
+          rows.setValid(row, false);
+        }
+        rows.updateBounds();
+        const auto selected = rows;
+        raw_vector<uint64_t> result(size);
+        std::fill(result.begin(), result.end(), kInitial);
+        VectorHasher::ScratchMemory scratch;
+        hasher->lookupValueIds(*probe, rows, scratch, result);
+
+        for (auto row = 0; row < size; ++row) {
+          const bool found =
+              selected.isValid(row) && expectedKeyIndex[row] >= 0;
+          ASSERT_EQ(rows.isValid(row), found) << "at " << row;
+          // With one key column the id is assigned. With several, it is added
+          // to the result of the previous column, multiplied.
+          const uint64_t id = expectedKeyIndex[row] + 1;
+          const uint64_t expected = !found ? kInitial
+              : multiplier == 1            ? id
+                                           : kInitial + multiplier * id;
+          ASSERT_EQ(result[row], expected) << "at " << row;
+        }
+      }
+    }
+  }
 };
 
 TEST_F(VectorHasherTest, flat) {
@@ -891,6 +940,52 @@ TEST_F(VectorHasherTest, lookupValueIdsHugeint) {
   EXPECT_EQ(result[1], 0);
   EXPECT_EQ(result[2], 2);
   EXPECT_EQ(result[3], 3);
+}
+
+TEST_F(VectorHasherTest, lookupValueIdsFlatNoNulls) {
+  // The probe cycles through 60 keys, of which 50 were built.
+  constexpr vector_size_t kNumKeys = 50;
+  constexpr vector_size_t kNumProbe = 200;
+  std::vector<int32_t> expectedKeyIndex(kNumProbe);
+  for (auto row = 0; row < kNumProbe; ++row) {
+    expectedKeyIndex[row] = row % 60 < kNumKeys ? row % 60 : -1;
+  }
+
+  // The values are far apart, so that the hasher assigns ids to distinct
+  // values instead of using the range.
+  testLookupValueIds(
+      makeFlatVector<int64_t>(
+          kNumKeys, [](vector_size_t row) { return row * 1'000'000'007LL; }),
+      makeFlatVector<int64_t>(
+          kNumProbe,
+          [](vector_size_t row) { return (row % 60) * 1'000'000'007LL; }),
+      expectedKeyIndex);
+
+  // The strings are longer than 12 bytes, so they are not inlined.
+  auto makeStrings = [&](vector_size_t size, vector_size_t modulo) {
+    std::vector<std::string> values;
+    for (auto row = 0; row < size; ++row) {
+      values.push_back(fmt::format("a-key-longer-than-12-{}", row % modulo));
+    }
+    return makeFlatVector<std::string>(values);
+  };
+  testLookupValueIds(
+      makeStrings(kNumKeys, kNumKeys),
+      makeStrings(kNumProbe, 60),
+      expectedKeyIndex);
+}
+
+TEST_F(VectorHasherTest, lookupValueIdsFlatBoolean) {
+  // Booleans are bit-packed and do not take the direct read of the values.
+  // False has id 1 and true has id 2.
+  const auto probe =
+      makeFlatVector<bool>(101, [](vector_size_t row) { return row % 3 == 0; });
+  std::vector<int32_t> expectedKeyIndex(probe->size());
+  for (auto row = 0; row < probe->size(); ++row) {
+    expectedKeyIndex[row] = row % 3 == 0 ? 1 : 0;
+  }
+  testLookupValueIds(
+      makeFlatVector<bool>({true, false}), probe, expectedKeyIndex, true);
 }
 
 TEST_F(VectorHasherTest, hugeintFilter) {
